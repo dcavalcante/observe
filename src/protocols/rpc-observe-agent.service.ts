@@ -52,6 +52,9 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(RpcObserveAgentService.name);
+  private readonly reportedGrpcStartupFailures = new Set<
+    "ignore" | "sampling" | "trace initialization"
+  >();
   private rpcTargetAddedSubscription: Subscription | undefined;
   /**
    * Assigned in `onModuleInit`. Every use below is reached only through the
@@ -225,25 +228,66 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
 
       return new Promise<unknown>((resolve) => {
         setTimeout(() => {
-          if (this.options.grpc?.ignore?.(call)) {
+          let ignored: boolean;
+          try {
+            ignored = this.options.grpc?.ignore?.(call) ?? false;
+          } catch {
+            this.warnGrpcStartupFailure("ignore");
             return resolve(done());
           }
 
-          const shouldCapture = this.traceSamplerService.shouldCapture("grpc", {
-            call,
-          });
+          if (ignored) {
+            return resolve(done());
+          }
+
+          let shouldCapture: boolean;
+          try {
+            shouldCapture = this.traceSamplerService.shouldCapture("grpc", {
+              call,
+            });
+          } catch {
+            this.warnGrpcStartupFailure("sampling");
+            return resolve(done());
+          }
+
           if (!shouldCapture) {
             return resolve(done());
           }
-          this.operationTraceRegistry.startTrace(traceId, {
-            protocol: this.toProtocolName(transportId),
-            operationId: call.operationId,
-            tags: this.options.grpc?.tags,
-          });
+
+          try {
+            this.operationTraceRegistry.startTrace(traceId, {
+              protocol: this.toProtocolName(transportId),
+              operationId: call.operationId,
+              tags: this.options.grpc?.tags,
+            });
+          } catch {
+            this.warnGrpcStartupFailure("trace initialization");
+          }
           resolve(done());
         }, 0);
       });
     });
+  }
+
+  /**
+   * A failed gRPC startup decision means the call should run without a trace.
+   * Report each failure category once, and keep logging itself out of the
+   * transport's processing path.
+   */
+  private warnGrpcStartupFailure(
+    source: "ignore" | "sampling" | "trace initialization",
+  ): void {
+    if (this.reportedGrpcStartupFailures.has(source)) {
+      return;
+    }
+    this.reportedGrpcStartupFailures.add(source);
+    try {
+      this.logger.warn(
+        `gRPC ${source} failed; skipping trace creation. Later failures in this category are not reported.`,
+      );
+    } catch {
+      // Logging an optional instrumentation failure must not stop the handler.
+    }
   }
 
   endRpcRequestTracing(

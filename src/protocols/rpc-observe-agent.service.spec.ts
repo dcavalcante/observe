@@ -79,31 +79,51 @@ describe("RpcObserveAgentService", () => {
    */
   describe("processing start hook", () => {
     const createHookedAgent = (
-      overrides: { ignore?: boolean; capture?: boolean } = {},
+      overrides: {
+        ignore?: boolean;
+        capture?: boolean;
+        throwInIgnore?: boolean;
+        throwInSampling?: boolean;
+      } = {},
     ) => {
+      const operationTraceRegistry = {
+        startTrace: vi.fn(),
+        endTrace: vi.fn(),
+        pluckSnapshot: vi.fn(),
+      };
       const agent = new RpcObserveAgentService(
         new AsyncLocalStorage<Map<string, any>>(),
         {
           traceIdKey: "traceId",
           traceIdGenerator: () => "trace-id",
           rpc: { ignore: () => overrides.ignore ?? false },
-          grpc: { ignore: () => overrides.ignore ?? false },
+          grpc: {
+            ignore: () => {
+              if (overrides.throwInIgnore) {
+                throw new Error("ignore failed");
+              }
+              return overrides.ignore ?? false;
+            },
+          },
         } as never,
         {
           getRpcTargetRegistry: () => ({
             subscribe: () => ({ unsubscribe: vi.fn() }),
           }),
         } as never,
-        {
-          startTrace: vi.fn(),
-          endTrace: vi.fn(),
-          pluckSnapshot: vi.fn(),
-        } as never,
+        operationTraceRegistry as never,
         {} as never,
-        { shouldCapture: () => overrides.capture ?? true } as never,
+        {
+          shouldCapture: () => {
+            if (overrides.throwInSampling) {
+              throw new Error("sampling failed");
+            }
+            return overrides.capture ?? true;
+          },
+        } as never,
       );
       agent.onModuleInit();
-      return agent;
+      return { agent, operationTraceRegistry };
     };
 
     const captureStartHook = (agent: ReturnType<typeof createHookedAgent>) => {
@@ -112,7 +132,7 @@ describe("RpcObserveAgentService", () => {
         ctx: unknown,
         done: () => Promise<unknown>,
       ) => unknown;
-      agent.registerRpcHooks({
+      agent.agent.registerRpcHooks({
         setOnProcessingStartHook: (hook: typeof startHook) => {
           startHook = hook;
         },
@@ -132,7 +152,9 @@ describe("RpcObserveAgentService", () => {
       ])(
         "returns what done returns when the operation is %s",
         async (_operation, overrides) => {
-          const startHook = captureStartHook(createHookedAgent(overrides));
+          const { agent, operationTraceRegistry } =
+            createHookedAgent(overrides);
+          const startHook = captureStartHook({ agent, operationTraceRegistry });
           const error = new Error("handler failed");
           const done = vi
             .fn<() => Promise<unknown>>()
@@ -148,13 +170,16 @@ describe("RpcObserveAgentService", () => {
           // gRPC calls done from a timer; let it fire so an extra call counts.
           await new Promise((resolve) => setTimeout(resolve, 0));
           expect(done).toHaveBeenCalledTimes(2);
+          expect(operationTraceRegistry.startTrace).toHaveBeenCalledTimes(
+            _operation === "traced" ? 2 : 0,
+          );
         },
       );
     });
 
     it("lets a Kafka consumer see an event handler's failure", async () => {
       const server = new ServerKafka({});
-      createHookedAgent().registerRpcHooks(server as never);
+      createHookedAgent().agent.registerRpcHooks(server as never);
       const error = new Error("handler failed");
       server.addHandler(
         "orders",
@@ -174,5 +199,37 @@ describe("RpcObserveAgentService", () => {
         } as never),
       ).rejects.toBe(error);
     });
+
+    it.each([
+      ["ignore", { throwInIgnore: true }],
+      ["sampling", { throwInSampling: true }],
+    ] as const)(
+      "runs the gRPC handler once without a trace when the %s decision throws",
+      async (_decision, overrides) => {
+        const { agent, operationTraceRegistry } = createHookedAgent(overrides);
+        const logger = (agent as unknown as { logger: { warn: () => void } })
+          .logger;
+        const warn = vi
+          .spyOn(logger, "warn")
+          .mockImplementation(() => {
+            throw new Error("logger failed");
+          });
+        const startHook = captureStartHook({ agent, operationTraceRegistry });
+        const businessError = new Error("business error");
+        const done = vi
+          .fn<() => Promise<unknown>>()
+          .mockRejectedValue(businessError);
+
+        for (let index = 0; index < 2; index++) {
+          await expect(
+            Promise.resolve(startHook(Transport.GRPC, {}, done)),
+          ).rejects.toBe(businessError);
+        }
+
+        expect(done).toHaveBeenCalledTimes(2);
+        expect(operationTraceRegistry.startTrace).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledTimes(1);
+      },
+    );
   });
 });
