@@ -41,10 +41,16 @@ describe("deferred trace completion safeguards", () => {
     const warn = vi.fn();
     const logger = { warn } as unknown as Logger;
     const callback = () => {
-      throw { toString: () => { throw new Error("format failed"); } };
+      throw {
+        toString: () => {
+          throw new Error("format failed");
+        },
+      };
     };
     expect(getUserIdSafely(callback, [], null, logger, "http")).toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("unprintable error"));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("unprintable error"),
+    );
   });
 
   it("consumes rejected deferred completion and warns once", async () => {

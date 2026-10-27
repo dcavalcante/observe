@@ -1,74 +1,110 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { createConnection } from "node:net";
-import { fileURLToPath } from "node:url";
+import { Controller, Get, INestApplication, Module } from "@nestjs/common";
+import { NestFactory } from "@nestjs/core";
+import { ExpressAdapter } from "@nestjs/platform-express";
+import { NodeAdapter } from "@nestjs/platform-node";
+import request from "supertest";
+import { createObserveModule } from "../observe.module.js";
+import {
+  CollectedSnapshots,
+  collectSnapshots,
+  testObserveOptions,
+  waitForSnapshot,
+} from "../testing/observe-harness.js";
 
-const childScript = fileURLToPath(
-  new URL("../testing/deferred-trace-child.mjs", import.meta.url),
-);
+const { ObserveModule, ObserveInstrument } = createObserveModule();
 
-async function runChild(throws: boolean) {
-  const child = spawn(process.execPath, [childScript], {
-    env: { ...process.env, THROW_USER_ID: throws ? "1" : "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout
-    .setEncoding("utf8")
-    .on("data", (chunk: string) => (stdout += chunk));
-  child.stderr
-    .setEncoding("utf8")
-    .on("data", (chunk: string) => (stderr += chunk));
-  await vi.waitFor(() => expect(stdout).toMatch(/READY \d+/), {
-    timeout: 10_000,
-  });
-  const port = Number(stdout.match(/READY (\d+)/)![1]);
-  const request = () =>
-    new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = createConnection({ host: "127.0.0.1", port }, () => {
-        req.write(
-          "GET /unauthenticated HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        );
-      });
-      let data = "";
-      req.setEncoding("utf8").on("data", (chunk) => (data += chunk));
-      req.on("end", () =>
-        resolve({
-          status: Number(data.match(/HTTP\/1\.1 (\d+)/)?.[1]),
-          body: data.split("\r\n\r\n")[1] ?? "",
-        }),
-      );
-      req.on("error", reject);
-    });
-  const response = await request();
-  if (throws) await request();
-  const [code, signal] = (await once(child, "exit")) as [
-    number | null,
-    NodeJS.Signals | null,
-  ];
-  return { response, code, signal, stdout, stderr };
+@Controller()
+class ProfileController {
+  @Get("me")
+  me() {
+    return { ok: true };
+  }
 }
 
-describe("deferred trace completion", () => {
-  it("survives a throwing getUserId callback and still delivers both traces", async () => {
-    const result = await runChild(true);
-    expect(result.response.status).toBe(200);
-    expect(result.response.body).toContain('"ok":true');
-    expect(result.code).toBe(0);
-    expect(result.signal).toBeNull();
-    expect(result.stdout).toContain(
-      'RESULT {"callbackCalls":2,"delivered":[null,null]}',
-    );
-    expect(result.stderr).not.toContain("getUserId exploded\n");
-  }, 15_000);
+@Module({
+  imports: [
+    ObserveModule.forRoot(
+      testObserveOptions({
+        http: {
+          // The usual shape, and the one that took the process down: an
+          // anonymous request has no `req.user`.
+          getUserId: (req) => req.user.id,
+        },
+      }),
+    ),
+  ],
+  controllers: [ProfileController],
+})
+class DeferredCompletionTestModule {}
 
-  it("preserves the user id from a successful callback", async () => {
-    const result = await runChild(false);
-    expect(result.response.status).toBe(200);
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain(
-      'RESULT {"callbackCalls":1,"delivered":["user-123"]}',
-    );
-  }, 15_000);
-});
+type Platform = "express" | "node";
+
+/**
+ * `getUserId` runs when the trace is completed, in a timer after the response
+ * has gone out. A throw there used to surface as an unhandled rejection and
+ * end the process; vitest fails the run on one, so without the guard these
+ * tests fail even before their assertions do.
+ */
+describe.each<Platform>(["express", "node"])(
+  "ObserveModule: deferred trace completion (%s)",
+  (platform) => {
+    let app: INestApplication;
+    let collected: CollectedSnapshots;
+
+    beforeAll(async () => {
+      app = await NestFactory.create(
+        DeferredCompletionTestModule,
+        platform === "node" ? new NodeAdapter() : new ExpressAdapter(),
+        {
+          instrument: ObserveInstrument,
+          logger: false,
+        },
+      );
+      app.use(
+        (
+          req: { headers: Record<string, string>; user?: { id: string } },
+          _res: unknown,
+          next: () => void,
+        ) => {
+          const userId = req.headers["x-user-id"];
+          if (userId) {
+            req.user = { id: userId };
+          }
+          next();
+        },
+      );
+      collected = collectSnapshots(app);
+      await app.init();
+    });
+
+    afterAll(async () => {
+      await app?.close();
+    });
+
+    beforeEach(() => collected.clear());
+
+    it("completes the trace without a user id when getUserId throws", async () => {
+      await request(app.getHttpServer()).get("/me").expect(200);
+      await request(app.getHttpServer()).get("/me").expect(200);
+
+      await vi.waitFor(() => expect(collected.items).toHaveLength(2));
+      expect(collected.items.map((item) => item.userId)).toEqual([
+        undefined,
+        undefined,
+      ]);
+    });
+
+    it("keeps the user id getUserId returns", async () => {
+      await request(app.getHttpServer())
+        .get("/me")
+        .set("x-user-id", "user-123")
+        .expect(200);
+
+      const snapshot = await waitForSnapshot(
+        collected,
+        (item) => item.operationId === "/me",
+      );
+      expect(snapshot.userId).toBe("user-123");
+    });
+  },
+);
