@@ -19,6 +19,10 @@ import {
   parseGraphQLOperation,
   toResolveInfoLike,
 } from "./graphql-operation-parser.js";
+import {
+  deferTraceCompletion,
+  getUserIdSafely,
+} from "./deferred-trace-completion.js";
 import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 /**
@@ -452,18 +456,29 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
    * operation out of the success bucket.
    */
   private endOperationTrace(traceId: string, context: unknown): void {
-    setTimeout(async () => {
-      const userId = this.options.graphql?.getUserId?.(context);
-      this.operationTraceRegistry.endTrace(traceId, { userId });
+    deferTraceCompletion(
+      async () => {
+        const userId = getUserIdSafely(
+          this.options.graphql?.getUserId,
+          [context],
+          this.options.graphql,
+          this.logger,
+          "graphql",
+        );
+        this.operationTraceRegistry.endTrace(traceId, { userId });
 
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+        const snapshot =
+          await this.operationTraceRegistry.pluckSnapshot(traceId);
+        if (!snapshot) {
+          return;
+        }
+        this.observeAgentSharedBuffer.insertRequestSnapshot(
+          snapshot as RequestSnapshot,
+        );
+      },
+      this.logger,
+      "graphql",
+    );
   }
 
   /**
