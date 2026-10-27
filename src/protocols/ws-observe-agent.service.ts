@@ -15,6 +15,7 @@ import {
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 type GatewayHandler = (...args: unknown[]) => unknown;
 
@@ -168,12 +169,14 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
       const traceId = uuidv7();
       store.set(this.options.traceIdKey, traceId);
 
-      const attributes = this.options.ws?.setAttributes?.(message);
-      if (attributes) {
-        for (const [key, value] of Object.entries(attributes)) {
-          store.set(key, value);
-        }
-      }
+      applyUserAttributesSafely(
+        this.options.ws?.setAttributes,
+        [message],
+        this.options.ws,
+        store,
+        this.logger,
+        "ws",
+      );
 
       if (
         this.options.ws?.ignore?.(message) ||

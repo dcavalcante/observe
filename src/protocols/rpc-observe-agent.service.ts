@@ -20,6 +20,7 @@ import {
   describePeerLoadError,
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
+import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 /**
  * The `@nestjs/microservices` surface this agent reads, loaded on demand so
@@ -170,14 +171,14 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
       const traceId = this.options.traceIdGenerator(ctx);
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.rpc?.setAttributes) {
-        const attributes = this.options.rpc?.setAttributes?.(transportId, ctx);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      applyUserAttributesSafely(
+        this.options.rpc?.setAttributes,
+        [transportId, ctx],
+        this.options.rpc,
+        store,
+        this.logger,
+        "rpc",
+      );
 
       if (this.options.rpc?.ignore?.(transportId, ctx)) {
         return done();
@@ -210,14 +211,14 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
       const traceId = this.options.traceIdGenerator(call);
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.grpc?.setAttributes) {
-        const attributes = this.options.grpc?.setAttributes?.(call);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      applyUserAttributesSafely(
+        this.options.grpc?.setAttributes,
+        [call],
+        this.options.grpc,
+        store,
+        this.logger,
+        "grpc",
+      );
 
       return new Promise<unknown>((resolve) => {
         setTimeout(() => {

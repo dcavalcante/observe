@@ -14,6 +14,7 @@ import { OperationTraceRegistry } from "../services/operation-trace.registry.js"
 import { KeyOf } from "../types/key-of.type.js";
 import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 /** What a queue driver knows about the run it is about to start. */
 export interface JobRunDescriptor {
@@ -276,12 +277,14 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
         id: typeof job.id === "number" ? `${job.id}` : job.id,
       };
 
-      const attributes = this.options.jobs?.setAttributes?.(context);
-      if (attributes) {
-        for (const [key, value] of Object.entries(attributes)) {
-          store.set(key, value);
-        }
-      }
+      applyUserAttributesSafely(
+        this.options.jobs?.setAttributes,
+        [context],
+        this.options.jobs,
+        store,
+        this.logger,
+        "jobs",
+      );
 
       if (this.isIgnored(context)) {
         // The trace id stays in the store so logs and jobs enqueued from here

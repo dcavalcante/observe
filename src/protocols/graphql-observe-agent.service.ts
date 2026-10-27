@@ -19,6 +19,7 @@ import {
   parseGraphQLOperation,
   toResolveInfoLike,
 } from "./graphql-operation-parser.js";
+import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 /**
  * Protocol recorded for a GraphQL operation that arrived over something other
@@ -559,12 +560,13 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     if (!store) {
       return;
     }
-    const attributes = this.options.graphql.setAttributes(info, context);
-    if (!attributes) {
-      return;
-    }
-    for (const [key, value] of Object.entries(attributes)) {
-      store.set(key, value);
-    }
+    applyUserAttributesSafely(
+      this.options.graphql.setAttributes,
+      [info, context],
+      this.options.graphql,
+      store,
+      this.logger,
+      "graphql",
+    );
   }
 }

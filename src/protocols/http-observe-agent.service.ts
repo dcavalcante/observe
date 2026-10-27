@@ -22,6 +22,7 @@ import { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { redactUrlQuery } from "../utils/redact-url-query.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import { applyUserAttributesSafely } from "./safe-set-attributes.js";
 
 /**
  * How long an aborted request's handler gets to finish its spans before the
@@ -157,14 +158,14 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
       const traceId = this.options.traceIdGenerator(req);
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.http?.setAttributes) {
-        const attributes = this.options.http?.setAttributes?.(req);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      applyUserAttributesSafely(
+        this.options.http?.setAttributes,
+        [req],
+        this.options.http,
+        store,
+        this.logger,
+        "http",
+      );
 
       // A request that is not recorded still carries its trace id, which an
       // adopted `x-request-id` can share with a recorded request. A registry
