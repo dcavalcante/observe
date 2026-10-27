@@ -19,6 +19,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { shouldIgnoreSafely } from "./ignore-predicate.js";
 
 type GatewayHandler = (...args: unknown[]) => unknown;
 
@@ -180,7 +181,13 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
       }
 
       if (
-        this.options.ws?.ignore?.(message) ||
+        shouldIgnoreSafely(
+          this.options.ws?.ignore,
+          [message],
+          this.options.ws,
+          this.logger,
+          "ws",
+        ) ||
         !this.traceSamplerService.shouldCapture("ws", {
           gateway: message.gateway,
           pattern: message.pattern,

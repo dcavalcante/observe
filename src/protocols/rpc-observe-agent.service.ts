@@ -24,6 +24,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { shouldIgnoreSafely } from "./ignore-predicate.js";
 
 /**
  * The `@nestjs/microservices` surface this agent reads, loaded on demand so
@@ -183,7 +184,15 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
         }
       }
 
-      if (this.options.rpc?.ignore?.(transportId, ctx)) {
+      if (
+        shouldIgnoreSafely(
+          this.options.rpc?.ignore,
+          [transportId, ctx],
+          this.options.rpc,
+          this.logger,
+          "rpc",
+        )
+      ) {
         return done();
       }
 

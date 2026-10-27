@@ -23,6 +23,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { shouldIgnoreSafely } from "./ignore-predicate.js";
 
 /**
  * Protocol recorded for a GraphQL operation that arrived over something other
@@ -239,7 +240,15 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       operationName,
     });
 
-    if (this.options.graphql?.ignore?.(info)) {
+    if (
+      shouldIgnoreSafely(
+        this.options.graphql?.ignore,
+        [info],
+        this.options.graphql,
+        this.logger,
+        "graphql",
+      )
+    ) {
       return undefined;
     }
 

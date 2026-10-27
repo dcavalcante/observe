@@ -26,6 +26,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { shouldIgnoreSafely } from "./ignore-predicate.js";
 
 /**
  * How long an aborted request's handler gets to finish its spans before the
@@ -358,7 +359,13 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
 
   private shouldIgnoreRequest(req: { url: string; method: string }): boolean {
     if (typeof this.options.http?.ignore === "function") {
-      return this.options.http.ignore(req);
+      return shouldIgnoreSafely(
+        this.options.http.ignore,
+        [req],
+        this.options.http,
+        this.logger,
+        "http",
+      );
     }
     if (Array.isArray(this.options.http?.ignore)) {
       const blocklist = this.options.http.ignore;
