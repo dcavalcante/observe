@@ -23,6 +23,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { generateTraceIdentitySafely } from "./safe-trace-id-generator.js";
 
 /**
  * Protocol recorded for a GraphQL operation that arrived over something other
@@ -375,21 +376,38 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       return undefined;
     }
 
-    const traceId = this.options.traceIdGenerator(info);
+    const identity = generateTraceIdentitySafely(
+      this.options.traceIdGenerator,
+      info,
+      this.options,
+      this.logger,
+    );
+    const traceId = identity.traceId;
+    if (traceId === undefined) {
+      return undefined;
+    }
+    const registryKey = identity.registryKey ?? traceId;
     const store = new Map<KeyOf<Store>, any>();
     store.set(this.options.traceIdKey, traceId);
+    if (registryKey !== traceId) {
+      store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
+    }
     this.asyncLocalStorage.enterWith(store);
 
     this.applyAttributes(info, ctx.context);
 
-    this.operationTraceRegistry.startTrace(traceId, {
-      protocol: GRAPHQL_PROTOCOL,
-      operationId,
-      tags: this.options.graphql?.tags,
-      attributes,
-    });
+    this.operationTraceRegistry.startTrace(
+      registryKey,
+      {
+        protocol: GRAPHQL_PROTOCOL,
+        operationId,
+        tags: this.options.graphql?.tags,
+        attributes,
+      },
+      traceId,
+    );
 
-    return this.openSpan(traceId, info, ctx, true);
+    return this.openSpan(registryKey, info, ctx, true);
   }
 
   /**

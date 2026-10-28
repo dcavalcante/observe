@@ -15,7 +15,7 @@ import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { KeyOf } from "../types/key-of.type.js";
-import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { OBSERVE_OPTIONS, TRACE_REGISTRY_KEY } from "../observe.constants.js";
 import {
   describePeerLoadError,
   loadOptionalPeer,
@@ -24,6 +24,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { generateTraceIdentitySafely } from "./safe-trace-id-generator.js";
 
 /**
  * The `@nestjs/microservices` surface this agent reads, loaded on demand so
@@ -171,8 +172,21 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     // identical object, one lookup fewer, and it is known to exist.
     const store = new Map<KeyOf<Store>, any>();
     return this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(ctx);
+      const identity = generateTraceIdentitySafely(
+        this.options.traceIdGenerator,
+        ctx,
+        this.options,
+        this.logger,
+      );
+      const traceId = identity.traceId;
+      if (traceId === undefined) {
+        return done();
+      }
       store.set(this.options.traceIdKey, traceId);
+      const registryKey = identity.registryKey ?? traceId;
+      if (registryKey !== traceId) {
+        store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
+      }
 
       if (this.options.rpc?.setAttributes) {
         const attributes = this.options.rpc?.setAttributes?.(transportId, ctx);
@@ -194,11 +208,15 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
       if (!shouldCapture) {
         return done();
       }
-      this.operationTraceRegistry.startTrace(traceId, {
-        protocol: this.toProtocolName(transportId),
-        operationId: this.getOperationIdFromContext(ctx),
-        tags: this.options.rpc?.tags,
-      });
+      this.operationTraceRegistry.startTrace(
+        registryKey,
+        {
+          protocol: this.toProtocolName(transportId),
+          operationId: this.getOperationIdFromContext(ctx),
+          tags: this.options.rpc?.tags,
+        },
+        traceId,
+      );
       return done();
     });
   }
@@ -211,8 +229,20 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     // As above: the map `run` is given, not looked back up.
     const store = new Map<KeyOf<Store>, any>();
     return this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(call);
-      store.set(this.options.traceIdKey, traceId);
+      const identity = generateTraceIdentitySafely(
+        this.options.traceIdGenerator,
+        call,
+        this.options,
+        this.logger,
+      );
+      const traceId = identity.traceId;
+      const registryKey = identity.registryKey ?? traceId;
+      if (traceId !== undefined) {
+        store.set(this.options.traceIdKey, traceId);
+        if (registryKey !== traceId) {
+          store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
+        }
+      }
 
       if (this.options.grpc?.setAttributes) {
         const attributes = this.options.grpc?.setAttributes?.(call);
@@ -225,6 +255,9 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
 
       return new Promise<unknown>((resolve) => {
         setTimeout(() => {
+          if (traceId === undefined || registryKey === undefined) {
+            return resolve(done());
+          }
           if (this.options.grpc?.ignore?.(call)) {
             return resolve(done());
           }
@@ -235,11 +268,15 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
           if (!shouldCapture) {
             return resolve(done());
           }
-          this.operationTraceRegistry.startTrace(traceId, {
-            protocol: this.toProtocolName(transportId),
-            operationId: call.operationId,
-            tags: this.options.grpc?.tags,
-          });
+          this.operationTraceRegistry.startTrace(
+            registryKey,
+            {
+              protocol: this.toProtocolName(transportId),
+              operationId: call.operationId,
+              tags: this.options.grpc?.tags,
+            },
+            traceId,
+          );
           resolve(done());
         }, 0);
       });
@@ -254,7 +291,9 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     if (!store) {
       return;
     }
-    const traceId = store.get(this.options.traceIdKey);
+    const traceId =
+      store.get(TRACE_REGISTRY_KEY as KeyOf<Store>) ??
+      store.get(this.options.traceIdKey);
     if (!traceId) {
       return;
     }

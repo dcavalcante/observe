@@ -26,6 +26,7 @@ import {
   deferTraceCompletion,
   getUserIdSafely,
 } from "./deferred-trace-completion.js";
+import { generateTraceIdentitySafely } from "./safe-trace-id-generator.js";
 
 /**
  * How long an aborted request's handler gets to finish its spans before the
@@ -158,7 +159,17 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     // identical object, one lookup fewer, and it is known to exist.
     const store = new Map<KeyOf<Store>, any>();
     this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(req);
+      const identity = generateTraceIdentitySafely(
+        this.options.traceIdGenerator,
+        req,
+        this.options,
+        this.logger,
+      );
+      const traceId = identity.traceId;
+      if (traceId === undefined) {
+        done();
+        return;
+      }
       store.set(this.options.traceIdKey, traceId);
 
       if (this.options.http?.setAttributes) {
@@ -207,9 +218,16 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
       // that fans out, or retries, sends the same id twice, and both requests
       // can be open here at once. The second gets a registry key of its own -
       // only the second, so the ordinary request is still keyed by its id.
-      let registryKey = traceId;
-      if (this.operationTraceRegistry.hasTrace(traceId)) {
-        registryKey = uuidv7();
+      let registryKey = identity.registryKey ?? traceId;
+      while (this.operationTraceRegistry.hasTrace(registryKey)) {
+        try {
+          registryKey = uuidv7();
+        } catch {
+          done();
+          return;
+        }
+      }
+      if (registryKey !== traceId) {
         store.set(TRACE_REGISTRY_KEY as KeyOf<Store>, registryKey);
       }
 
